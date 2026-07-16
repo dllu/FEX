@@ -147,6 +147,18 @@ std::recursive_mutex ThreadCreationMutex;
 // Map of TIDs to their FEX thread state, `ThreadCreationMutex` must be locked when accessing
 std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*> Threads;
 
+constexpr uint32_t CPSR_FEX_PF = 1U << 22;
+constexpr uint32_t CPSR_FEX_AF = 1U << 23;
+constexpr uint32_t CPSR_FEX_DF = 1U << 24;
+constexpr uint32_t CPSR_FEX_RF = 1U << 25;
+constexpr uint32_t CPSR_FEX_AC = 1U << 26;
+
+constexpr uint32_t ECValidEFlagsMask = (1U << FEXCore::X86State::RFLAG_OF_RAW_LOC) | (1U << FEXCore::X86State::RFLAG_CF_RAW_LOC) |
+                                       (1U << FEXCore::X86State::RFLAG_ZF_RAW_LOC) | (1U << FEXCore::X86State::RFLAG_SF_RAW_LOC) |
+                                       (1U << FEXCore::X86State::RFLAG_TF_RAW_LOC) | (1U << FEXCore::X86State::RFLAG_PF_RAW_LOC) |
+                                       (1U << FEXCore::X86State::RFLAG_AF_RAW_LOC) | (1U << FEXCore::X86State::RFLAG_DF_RAW_LOC) |
+                                       (1U << FEXCore::X86State::RFLAG_RF_LOC) | (1U << FEXCore::X86State::RFLAG_AC_LOC);
+
 std::pair<NTSTATUS, ThreadCPUArea> GetThreadCPUArea(HANDLE Thread) {
   THREAD_BASIC_INFORMATION Info;
   const NTSTATUS Err = NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), nullptr);
@@ -459,11 +471,16 @@ static ARM64_NT_CONTEXT StoreStateToPackedECContext(FEXCore::Core::InternalThrea
   ECContext.X24 = 0;
   ECContext.X28 = 0;
 
-  // NZCV+SS will be converted into EFlags by ntdll, the rest are lost during exception handling.
+  // NZCV+SS and FEX's private CPSR extension bits will be converted into EFlags by ntdll.
   // See HandleGuestException
   uint32_t EFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
   ECContext.Cpsr = 0;
   ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_TF_RAW_LOC)) ? (1U << 21) : 0;
+  ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_PF_RAW_LOC)) ? CPSR_FEX_PF : 0;
+  ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_AF_RAW_LOC)) ? CPSR_FEX_AF : 0;
+  ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_DF_RAW_LOC)) ? CPSR_FEX_DF : 0;
+  ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_RF_LOC)) ? CPSR_FEX_RF : 0;
+  ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_AC_LOC)) ? CPSR_FEX_AC : 0;
   ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_OF_RAW_LOC)) ? (1U << 28) : 0;
   ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_CF_RAW_LOC)) ? (1U << 29) : 0;
   ECContext.Cpsr |= (EFlags & (1U << FEXCore::X86State::RFLAG_ZF_RAW_LOC)) ? (1U << 30) : 0;
@@ -476,24 +493,24 @@ static ARM64_NT_CONTEXT StoreStateToPackedECContext(FEXCore::Core::InternalThrea
 }
 
 static void RethrowGuestException(const EXCEPTION_RECORD& Rec, ARM64_NT_CONTEXT& Context) {
-  const auto& Config = SignalDelegator->GetConfig();
   auto* Thread = GetCPUArea().ThreadState();
   auto& Fault = Thread->CurrentFrame->SynchronousFaultData;
-  uint64_t GuestSp = Context.X[Config.SRAGPRMapping[static_cast<size_t>(FEXCore::X86State::REG_RSP)]];
-  auto* Args = reinterpret_cast<KiUserExceptionDispatcherStackLayout*>(FEXCore::AlignDown(GuestSp, 64)) - 1;
 
   LogMan::Msg::DFmt("Reconstructing context");
   if (!IsDispatcherAddress(Context.Pc)) {
     ReconstructThreadState(Thread, Context);
   }
+
+  const uint64_t GuestSp = Thread->CurrentFrame->State.gregs[FEXCore::X86State::REG_RSP];
+  auto* Args = reinterpret_cast<KiUserExceptionDispatcherStackLayout*>(FEXCore::AlignDown(GuestSp, 64)) - 1;
   Args->Context = StoreStateToPackedECContext(Thread, Context.Fpcr, Context.Fpsr);
   LogMan::Msg::DFmt("pc: {:X} rip: {:X}", Context.Pc, Args->Context.Pc);
 
   // X64 Windows always clears TF, DF and AF when handling an exception, restoring after.
-  // Current ARM64EC windows can only restore NZCV+SS when returning from an exception and other flags are left untouched from the handler context.
-  // TODO: Can extend wine to support this by mapping the remaining EFlags into reserved cpsr members.
+  // FEX's Wine-side ARM64EC context conversion preserves the flags that can be round-tripped.
   uint32_t EFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
-  EFlags &= ~(1 << FEXCore::X86State::RFLAG_TF_RAW_LOC);
+  EFlags &= ~((1 << FEXCore::X86State::RFLAG_TF_RAW_LOC) | (1 << FEXCore::X86State::RFLAG_DF_RAW_LOC) |
+              (1 << FEXCore::X86State::RFLAG_AF_RAW_LOC));
   CTX->SetFlagsFromCompactedEFLAGS(Thread, EFlags);
 
   Args->Rec = FEX::Windows::HandleGuestException(Fault, Rec, Args->Context.Pc, Args->Context.X8, Args->Context.X0);
@@ -565,12 +582,8 @@ public:
 extern "C" void SyncThreadContext(CONTEXT* Context) {
   ProcessPendingCrossProcessEmulatorWork();
   auto* Thread = GetCPUArea().ThreadState();
-  // All other EFlags bits are lost when converting to/from an ARM64EC context, so merge them in from the current JIT state.
+  // EFlags bits that cannot round-trip through Wine's ARM64EC context are merged in from the current JIT state.
   // This is advisable over dropping their values as thread suspend/resume uses this function, and that can happen at any point in guest code.
-  static constexpr uint32_t ECValidEFlagsMask {(1U << FEXCore::X86State::RFLAG_OF_RAW_LOC) | (1U << FEXCore::X86State::RFLAG_CF_RAW_LOC) |
-                                               (1U << FEXCore::X86State::RFLAG_ZF_RAW_LOC) | (1U << FEXCore::X86State::RFLAG_SF_RAW_LOC) |
-                                               (1U << FEXCore::X86State::RFLAG_TF_RAW_LOC)};
-
   uint32_t StateEFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
   Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
   Exception::LoadStateFromECContext(Thread, *Context);
@@ -740,14 +753,15 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
     return true;
   }
 
-  if (IsEmulatorStackAddress(CPUArea, reinterpret_cast<uint64_t>(__builtin_frame_address(0)))) {
-    Exception::RethrowGuestException(*Exception, *NativeContext);
-    LogMan::Msg::DFmt("Rethrowing onto guest stack: {:X}", NativeContext->Sp);
-    return true;
-  } else {
-    LogMan::Msg::EFmt("Unexpected exception in JIT code on guest stack");
-    return false;
+  const auto FrameAddress = reinterpret_cast<uint64_t>(__builtin_frame_address(0));
+  if (!IsEmulatorStackAddress(CPUArea, FrameAddress)) {
+    LogMan::Msg::IFmt("Rethrowing JIT exception from non-emulator frame stack: frame {:X}, native sp {:X}, pc {:X}",
+                      FrameAddress, NativeContext->Sp, NativeContext->Pc);
   }
+
+  Exception::RethrowGuestException(*Exception, *NativeContext);
+  LogMan::Msg::DFmt("Rethrowing onto guest stack: {:X}", NativeContext->Sp);
+  return true;
 }
 
 NTSTATUS ResetToConsistentState(EXCEPTION_RECORD* Exception, CONTEXT* GuestContext, ARM64_NT_CONTEXT* NativeContext) {
