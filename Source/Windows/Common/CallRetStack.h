@@ -46,6 +46,7 @@ bool HandleAccessViolation(FEXCore::Core::InternalThreadState* Thread, uint64_t 
   if (Address >= CallRetStackInfo.AllocationBase && Address < CallRetStackInfo.AllocationEnd) {
     LogMan::Msg::DFmt("Call-ret stack inbalance: {:X}", Address);
     CallRetSPReg = CallRetStackInfo.DefaultLocation;
+    Thread->CurrentFrame->State.callret_sp = CallRetStackInfo.DefaultLocation;
     return true;
   }
   return false;

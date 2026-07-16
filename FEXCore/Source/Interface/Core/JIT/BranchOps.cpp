@@ -19,6 +19,12 @@ $end_info$
 
 namespace FEXCore::CPU {
 
+#ifdef ARCHITECTURE_arm64ec
+static constexpr bool RhinoDisableArm64ECCallRetStack = true;
+#else
+static constexpr bool RhinoDisableArm64ECCallRetStack = false;
+#endif
+
 DEF_OP(CallbackReturn) {
   // spill back to CTX
   SpillStaticRegs(TMP1);
@@ -162,11 +168,13 @@ DEF_OP(ExitFunction) {
       ARMEmitter::ForwardLabel l_CallReturn;
       if (Op->Hint == IR::BranchHint::Call) {
         if (!Op->CallReturnBlock.IsInvalid()) {
-          auto CallReturnAddressReg = GetReg(Op->CallReturnAddress).X();
           PendingCallReturnTargetLabel = &CallReturnTargets.try_emplace(Op->CallReturnBlock.ID()).first->second;
-          (void)adr(TMP1, &l_CallReturn);
-          stp<ARMEmitter::IndexType::PRE>(CallReturnAddressReg, TMP1, REG_CALLRET_SP, -0x10);
-        } else {
+          if constexpr (!RhinoDisableArm64ECCallRetStack) {
+            auto CallReturnAddressReg = GetReg(Op->CallReturnAddress).X();
+            (void)adr(TMP1, &l_CallReturn);
+            stp<ARMEmitter::IndexType::PRE>(CallReturnAddressReg, TMP1, REG_CALLRET_SP, -0x10);
+          }
+        } else if constexpr (!RhinoDisableArm64ECCallRetStack) {
           stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::zr, ARMEmitter::XReg::zr, REG_CALLRET_SP, -0x10);
         }
       } else if (Op->Hint == IR::BranchHint::CheckTF) {
@@ -189,7 +197,7 @@ DEF_OP(ExitFunction) {
     ARMEmitter::ForwardLabel SkipFullLookup;
     auto RipReg = GetReg(Op->NewRIP);
 
-    if (Op->Hint == IR::BranchHint::Return) {
+    if (Op->Hint == IR::BranchHint::Return && !RhinoDisableArm64ECCallRetStack) {
       // First try to pop from the call-ret stack, otherwise follow the normal path (but ending in a ret)
       ldp<ARMEmitter::IndexType::POST>(TMP1, TMP2, REG_CALLRET_SP, 0x10);
       sub(TMP1, TMP1, RipReg.X());
@@ -216,11 +224,13 @@ DEF_OP(ExitFunction) {
     if (Op->Hint == IR::BranchHint::Call) {
       ARMEmitter::ForwardLabel l_CallReturn;
       if (!Op->CallReturnBlock.IsInvalid()) {
-        auto CallReturnAddressReg = GetReg(Op->CallReturnAddress).X();
         PendingCallReturnTargetLabel = &CallReturnTargets.try_emplace(Op->CallReturnBlock.ID()).first->second;
-        (void)adr(TMP1, &l_CallReturn);
-        stp<ARMEmitter::IndexType::PRE>(CallReturnAddressReg, TMP1, REG_CALLRET_SP, -0x10);
-      } else {
+        if constexpr (!RhinoDisableArm64ECCallRetStack) {
+          auto CallReturnAddressReg = GetReg(Op->CallReturnAddress).X();
+          (void)adr(TMP1, &l_CallReturn);
+          stp<ARMEmitter::IndexType::PRE>(CallReturnAddressReg, TMP1, REG_CALLRET_SP, -0x10);
+        }
+      } else if constexpr (!RhinoDisableArm64ECCallRetStack) {
         stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::zr, ARMEmitter::XReg::zr, REG_CALLRET_SP, -0x10);
       }
       blr(TMP2);

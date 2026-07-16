@@ -30,6 +30,12 @@
 
 namespace FEXCore::CPU {
 
+#ifdef ARCHITECTURE_arm64ec
+static constexpr bool RhinoDisableArm64ECCallRetStack = true;
+#else
+static constexpr bool RhinoDisableArm64ECCallRetStack = false;
+#endif
+
 static void SleepThread(FEXCore::Context::ContextImpl* CTX, FEXCore::Core::CpuStateFrame* Frame) {
   CTX->SyscallHandler->SleepThread(CTX, Frame);
 }
@@ -123,16 +129,18 @@ void Dispatcher::EmitDispatcher() {
 
   FillSpecialRegs(TMP1, TMP2, false, true);
 
-  // As ARM64EC uses this as an entrypoint for both guest calls and host returns, opportunistically try to return
-  // using the call-ret stack to avoid unbalancing it.
-  ldp<ARMEmitter::IndexType::OFFSET>(TMP1, TMP2, REG_CALLRET_SP);
-  // EC_CALL_CHECKER_PC_REG is REG_PF which isn't touched by any of the above
-  sub(ARMEmitter::Size::i64Bit, TMP1, EC_CALL_CHECKER_PC_REG, TMP1);
-  (void)cbnz(ARMEmitter::Size::i64Bit, TMP1, &LoopTop);
+  if constexpr (!RhinoDisableArm64ECCallRetStack) {
+    // As ARM64EC uses this as an entrypoint for both guest calls and host returns, opportunistically try to return
+    // using the call-ret stack to avoid unbalancing it.
+    ldp<ARMEmitter::IndexType::OFFSET>(TMP1, TMP2, REG_CALLRET_SP);
+    // EC_CALL_CHECKER_PC_REG is REG_PF which isn't touched by any of the above
+    sub(ARMEmitter::Size::i64Bit, TMP1, EC_CALL_CHECKER_PC_REG, TMP1);
+    (void)cbnz(ARMEmitter::Size::i64Bit, TMP1, &LoopTop);
 
-  // If the entry at the TOS is for the target address, pop it and return to the JIT code
-  add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x10);
-  ret(TMP2);
+    // If the entry at the TOS is for the target address, pop it and return to the JIT code
+    add(ARMEmitter::Size::i64Bit, REG_CALLRET_SP, REG_CALLRET_SP, 0x10);
+    ret(TMP2);
+  }
 
   // Enter JIT
 #endif
@@ -501,7 +509,9 @@ void Dispatcher::EmitDispatcher() {
 
     // load static regs
     FillStaticRegs();
-    stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::zr, ARMEmitter::XReg::zr, REG_CALLRET_SP, -0x10);
+    if constexpr (!RhinoDisableArm64ECCallRetStack) {
+      stp<ARMEmitter::IndexType::PRE>(ARMEmitter::XReg::zr, ARMEmitter::XReg::zr, REG_CALLRET_SP, -0x10);
+    }
 
     // Now go back to the regular dispatcher loop
     (void)b(&LoopTop);
