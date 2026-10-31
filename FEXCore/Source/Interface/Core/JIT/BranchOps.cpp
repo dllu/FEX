@@ -250,6 +250,12 @@ DEF_OP(CondJump) {
 
   auto TrueTargetLabel = JumpTarget(Op->TrueBlock);
 
+  // A taken conditional back-edge bypasses the pending fall-through branch
+  // emitted by CompileCode. It must service cooperative interrupts too.
+  if (TrueTargetLabel->Backward.Location) {
+    EmitSuspendInterruptCheck();
+  }
+
   if (Op->FromNZCV) {
     b_OrRestart(MapCC(Op->Cond), TrueTargetLabel);
   } else {

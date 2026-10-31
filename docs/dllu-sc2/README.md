@@ -115,3 +115,19 @@ reports `00000a96` / `00000256` and passes. The x64 control passes before and
 after. x64/i386 memory/publication and i386 event/semaphore/mutex/APC probes
 also pass. This is a correctness fix; SC2's 32-bit startup and performance
 remain separate validation steps.
+
+## Conditional loop suspension
+
+Conditional branches to an already-bound backwards target now check pending
+cooperative interrupts, as unconditional back-edges already do. Previously a
+tight conditional loop could bypass every check after its initial entry.
+SuspendThread then hung with a nonzero suspend doorbell while the worker kept
+running. A read-only native debugger check confirmed the pending doorbell and
+the loop's missing check. This reproduced with register coalescing disabled.
+
+The x64 `register-cache-probe.c` checks 10,000 arithmetic/fault-context cases,
+then repeatedly suspends and reads a worker executing a conditional backwards
+loop. Before the branch fix the suspension phase hangs; afterward all 500
+suspended register relations pass with ordinary per-instruction flushing.
+The fault-context arithmetic and zero-extension checks also pass. Build with
+LLVM-MinGW's x64 compiler and `-O2`. The probe does not patch a game binary.
