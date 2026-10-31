@@ -582,9 +582,9 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
       bool BlockInForceTSOValidRange = false;
       auto InstForceTSOIt = ForceTSOInstructions.end();
       if (ForceTSOValidRanges.Contains({Block.Entry, Block.Entry + Block.Size})) {
+        BlockInForceTSOValidRange = true;
         if (auto It = ForceTSOInstructions.lower_bound(Block.Entry); It != ForceTSOInstructions.end() && *It < Block.Entry + Block.Size) {
           InstForceTSOIt = It;
-          BlockInForceTSOValidRange = true;
         }
       }
 

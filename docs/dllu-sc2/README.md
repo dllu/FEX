@@ -68,3 +68,33 @@ Build `heap-collapse-probe.c` natively with `cc -O2 -ldl` and pass the helper
 bounded passes, unchanged data, an explicit no-huge-page range, 4 KiB
 protection changes and the parent's signal mask. It passes on the GB10.
 The feature remains opt-in while replay measurements continue.
+
+## Volatile range regression
+
+`Core.cpp` must mark a block as covered by volatile metadata independently of
+whether that block contains an explicit volatile instruction. Previously, an
+empty instruction list, or an ordered instruction in a different block, made
+the declared range ineffective. The local fix moves range membership outside
+the instruction lookup. It does not change code without volatile metadata.
+
+`volatile-codegen-probe.c` and `check-volatile-codegen.py` check actual generated
+ARM instructions, rather than only parser output. Build the C source with the
+LLVM-MinGW 20261006 x64 compiler and `-O0`. Verify `selected` is at RVA `1470`
+and `outside` at `1490` with `llvm-nm` (the checker deliberately fails if these
+addresses change). Run in a disposable, matching Wine/FEX prefix with:
+
+```
+FEX_MAXINST=1 FEX_MULTIBLOCK=0 FEX_BLOCKJITNAMING=1 \
+FEX_EXTENDEDVOLATILEMETADATA='volatile-codegen-probe.exe;1470-1488;147c'
+```
+
+Then run the read-only checker with `sudo python3 check-volatile-codegen.py
+--pid <Linux PID> --expect mixed`. The first load and stores in the selected
+range must be ordinary accesses; the explicitly ordered load at `147c` and
+both outside accesses must remain ordered. This fails with the prior runtime
+and passes with the fix. Repeat with the metadata variable unset and
+`--expect ordered`, then with its value `volatile-codegen-probe.exe` and
+`--expect relaxed`; both pass. x64/i386 `fex-memory-probe.c` also pass with
+normal ordering enabled. Relaxed whole-application replay runs are diagnostic
+only and are never a production configuration or evidence of achieving the
+correctness-preserving FPS target.
