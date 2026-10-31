@@ -131,3 +131,10 @@ loop. Before the branch fix the suspension phase hangs; afterward all 500
 suspended register relations pass with ordinary per-instruction flushing.
 The fault-context arithmetic and zero-extension checks also pass. Build with
 LLVM-MinGW's x64 compiler and `-O2`. The probe does not patch a game binary.
+
+The smaller `conditional-suspend-probe.c` supports both i386 and x64. Its
+worker has no calls or unconditional loop branch; it preserves a counter
+relation across the conditional back-edge. Both builds pass 500 suspended
+contexts with the fixed runtime, alongside the existing memory/publication,
+exception-flags and event/semaphore/mutex/APC probes. Compile each with the
+corresponding LLVM-MinGW compiler and `-O2`.
