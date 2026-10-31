@@ -98,3 +98,20 @@ and passes with the fix. Repeat with the metadata variable unset and
 normal ordering enabled. Relaxed whole-application replay runs are diagnostic
 only and are never a production configuration or evidence of achieving the
 correctness-preserving FPS target.
+
+## Exception-context reserved flags
+
+`CPUState.flags[24..27]` stores packed Arm NZCV, rather than architectural
+x86 flag bytes. `ReconstructCompactedEFLAGS` must skip these bytes in its
+initial flag-compaction loop. In particular, the packed overflow byte could
+leak into reserved EFLAGS bit31 in WoW64 exception contexts. The subsequent
+condition-flag reconstruction already handles OF/CF/ZF/SF separately.
+
+`exception-flags-probe.c`, built with LLVM-MinGW `-O2` for i386 and x64,
+alternates overflowing ADD and XOR followed by handled privileged-instruction
+faults. It checks reserved bits and OF in the actual vectored-handler context.
+Before the fix, i386 reports `80000a96` / `80000256` and fails; afterward it
+reports `00000a96` / `00000256` and passes. The x64 control passes before and
+after. x64/i386 memory/publication and i386 event/semaphore/mutex/APC probes
+also pass. This is a correctness fix; SC2's 32-bit startup and performance
+remain separate validation steps.
