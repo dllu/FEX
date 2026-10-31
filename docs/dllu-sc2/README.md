@@ -43,3 +43,27 @@ Wine's i386 Windows DLLs in the test prefix's `syswow64` directory.
 These checks establish correctness for the exercised cases. Heavy-battle
 performance remains an ongoing replay benchmark, at native Wayland and
 3840x2160 maximum graphics/physics; they do not establish a 60 FPS minimum.
+
+## Optional populated-heap promotion
+
+`FEX_HEAP_HUGEPAGES=SC2_x64.exe` enables a native Unix worker only when the
+process basename matches that value. `1` enables it for every process using
+the helper; an unset value or `0` leaves it off. Use it with the matching
+Wine's `WINE_HUGEPAGES=1` allocation policy. It reads `smaps` every two seconds
+and advises at most 64 MiB per pass with `MADV_COLLAPSE`. Only unnamed,
+anonymous private writable VMAs already marked `hg`, at least 80% resident,
+and less than 75% huge-backed qualify. Explicit `nh` ranges, named FEX
+lookup/metadata ranges, executable mappings and sparse reservations are
+excluded. Work rotates through the eligible ranges rather than repeating
+only the start of a large VMA.
+
+The worker blocks Wine-handled signals before thread creation, restores the
+parent mask, and never calls Windows APIs. Its lifetime is the process's;
+the Unix helper remains loaded. The launcher scopes the CPU placement of this
+thread together with SC2's other workers.
+
+Build `heap-collapse-probe.c` natively with `cc -O2 -ldl` and pass the helper
+`.so` path. It checks promotion of a populated 96 MiB range across successive
+bounded passes, unchanged data, an explicit no-huge-page range, 4 KiB
+protection changes and the parent's signal mask. It passes on the GB10.
+The feature remains opt-in while replay measurements continue.

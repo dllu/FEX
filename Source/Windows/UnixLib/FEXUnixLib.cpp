@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: MIT
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <type_traits>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <string>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "FEXUnixLib.h"
@@ -22,6 +29,146 @@ using unixlib_entry_t = NTSTATUS (*)(void*);
 constexpr NTSTATUS STATUS_SUCCESS = 0;
 constexpr NTSTATUS STATUS_NOT_SUPPORTED = 0xC00000BB;
 constexpr NTSTATUS STATUS_INTERNAL_ERROR = 0xC00000E5;
+
+namespace {
+// Explicitly opt in by executable basename (or "1" for all processes). Wine's
+// WINE_HUGEPAGES policy marks the eligible private reservations with VM_HUGEPAGE.
+// Small adjacent reservations can merge only after their first faults, so those
+// heaps otherwise wait for khugepaged to revisit already populated 4K pages.
+bool HeapCollapseEnabled() {
+  const char* Option = getenv("FEX_HEAP_HUGEPAGES");
+  if (!Option || !*Option || !strcmp(Option, "0")) {
+    return false;
+  }
+  if (!strcmp(Option, "1")) {
+    return true;
+  }
+
+  char Command[4096] {};
+  FILE* File = fopen("/proc/self/cmdline", "re");
+  if (!File) {
+    return false;
+  }
+  const size_t Length = fread(Command, 1, sizeof(Command) - 1, File);
+  fclose(File);
+  if (!Length) {
+    return false;
+  }
+  const char* Name = Command;
+  for (const char* It = Command; *It; ++It) {
+    if (*It == '/' || *It == '\\') {
+      Name = It + 1;
+    }
+  }
+  return !strcmp(Name, Option);
+}
+
+struct HeapRange {
+  uintptr_t Begin {}, End {};
+  size_t ResidentKB {}, HugeKB {};
+  bool PrivateWritableAnon {}, HugeHint {};
+};
+
+void CollapseHeaps(uintptr_t& Cursor, size_t HugeSize) {
+  FILE* File = fopen("/proc/self/smaps", "re");
+  if (!File) {
+    return;
+  }
+  constexpr size_t Budget = 64 * 1024 * 1024;
+  size_t Advised {};
+  bool Exhausted {};
+  HeapRange Range {};
+  auto Visit = [&]() {
+    if (!Range.PrivateWritableAnon || !Range.HugeHint || Range.End <= Cursor ||
+        Range.ResidentKB * 1024 < (Range.End - Range.Begin) * 4 / 5 ||
+        Range.HugeKB >= Range.ResidentKB * 3 / 4) {
+      return;
+    }
+    uintptr_t Begin = (std::max(Range.Begin, Cursor) + HugeSize - 1) & -HugeSize;
+    const uintptr_t End = Range.End & -HugeSize;
+    if (End <= Begin) {
+      return;
+    }
+    const size_t Length = std::min<size_t>(End - Begin, Budget - Advised);
+    if (Length < HugeSize) {
+      Exhausted = true;
+      return;
+    }
+    // MADV_COLLAPSE leaves mappings and their data intact, rejects VM_NOHUGEPAGE
+    // and validates each VMA again if the application changed it after our scan.
+    madvise(reinterpret_cast<void*>(Begin), Length, 25 /* MADV_COLLAPSE */);
+    Advised += Length;
+    Cursor = Begin + Length;
+    Exhausted = Advised == Budget;
+  };
+
+  char* Line {};
+  size_t Capacity {};
+  while (!Exhausted && getline(&Line, &Capacity, File) >= 0) {
+    unsigned long Begin {}, End {};
+    char Permissions[5] {};
+    int Used {};
+    if (sscanf(Line, "%lx-%lx %4s %*s %*s %*s %n", &Begin, &End, Permissions, &Used) == 3 && Used) {
+      Visit();
+      Range = {.Begin = Begin, .End = End,
+               .PrivateWritableAnon = !strcmp(Permissions, "rw-p") && (!Line[Used] || Line[Used] == '\n')};
+    } else if (!strncmp(Line, "Rss:", 4)) {
+      Range.ResidentKB = strtoul(Line + 4, nullptr, 10);
+    } else if (!strncmp(Line, "AnonHugePages:", 14)) {
+      Range.HugeKB = strtoul(Line + 14, nullptr, 10);
+    } else if (!strncmp(Line, "VmFlags:", 8)) {
+      Range.HugeHint = strstr(Line + 8, " hg") && !strstr(Line + 8, " nh");
+    }
+  }
+  if (!Exhausted) {
+    Visit();
+  }
+  if (!Exhausted) {
+    Cursor = 0;
+  }
+  free(Line);
+  fclose(File);
+}
+
+void* HeapCollapseWorker(void*) {
+  size_t HugeSize = 2 * 1024 * 1024;
+  if (FILE* File = fopen("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size", "re")) {
+    unsigned long Size {};
+    if (fscanf(File, "%lu", &Size) == 1 && Size && !(Size & (Size - 1))) {
+      HugeSize = Size;
+    }
+    fclose(File);
+  }
+  if (HugeSize > 64 * 1024 * 1024) {
+    return nullptr;
+  }
+  pthread_setname_np(pthread_self(), "FEX heap THP");
+  uintptr_t Cursor {};
+  for (;;) {
+    struct timespec Delay {2, 0};
+    nanosleep(&Delay, nullptr);
+    CollapseHeaps(Cursor, HugeSize);
+  }
+}
+
+void StartHeapCollapseWorker() {
+  if (!HeapCollapseEnabled()) {
+    return;
+  }
+  // This is a Linux-only worker with no Wine TEB. Keep Wine's signal handlers
+  // out of it and restore the calling thread's original mask before returning.
+  sigset_t All, Previous;
+  sigfillset(&All);
+  if (pthread_sigmask(SIG_BLOCK, &All, &Previous)) {
+    return;
+  }
+  pthread_t Thread;
+  if (!pthread_create(&Thread, nullptr, HeapCollapseWorker, nullptr)) {
+    pthread_detach(Thread);
+  }
+  pthread_sigmask(SIG_SETMASK, &Previous, nullptr);
+}
+} // namespace
 
 #ifndef PR_GET_MEM_MODEL
 #define PR_GET_MEM_MODEL 0x6d4d444c
@@ -177,6 +324,8 @@ static NTSTATUS FEXUnixLib_MapFileHandler(void* _Args) {
 }
 
 static NTSTATUS FEXUnixLib_GetPIDHandler(void* _Args) {
+  static pthread_once_t Once = PTHREAD_ONCE_INIT;
+  pthread_once(&Once, StartHeapCollapseWorker);
   auto Args = reinterpret_cast<FEXUnixLib_GetPID*>(_Args);
   Args->Result = ::getpid();
   return STATUS_SUCCESS;
