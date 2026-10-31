@@ -1,6 +1,12 @@
 {
   "Options": {
     "CPU": {
+      "ReuseGuestAddresses": {
+        "Type": "bool",
+        "Default": "false",
+        "AffectsCodeGen": "true",
+        "Desc": ["Reuse nearby entrypoint-relative addresses within conservative straight-line JIT sequences"]
+      },
       "Multiblock": {
         "Type": "bool",
         "Default": "true",

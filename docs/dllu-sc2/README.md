@@ -138,3 +138,27 @@ relation across the conditional back-edge. Both builds pass 500 suspended
 contexts with the fixed runtime, alongside the existing memory/publication,
 exception-flags and event/semaphore/mutex/APC probes. Compile each with the
 corresponding LLVM-MinGW compiler and `-O2`.
+
+## Experimental nearby guest addresses
+
+This branch adds default-off `ReuseGuestAddresses` (`FEX_REUSEGUESTADDRESSES=1`)
+for conservative straight-line sequences of entrypoint-relative addresses and
+memory loads. It replaces repeated constant materialization with ADD/SUB when
+a known address remains in a GPR. Loads invalidate their GPR destination; all
+other operations and block boundaries clear the cache. Only 64-bit addresses
+participate. Derived addresses retain the first address's module relocation
+delta. The option participates in the code-cache configuration hash.
+
+`guest-address-probe.c`, built for x64 with LLVM-MinGW `-O2`, checks 10,000 sets
+of RIP-relative loads/LEAs, positive and negative deltas, larger offsets,
+clobbers and branches. Both modes pass. The load-chain mapped compilation
+span shrinks from 272 to 240 bytes, and the LEA chain from 240 to 208 bytes;
+these extents include metadata. Actual native dumps show the new ADD/SUB
+instructions. x64/i386 memory/publication, exception flags, synchronization
+and suspension probes also pass with the feature enabled.
+
+This establishes exercised correctness and activation, not a game speedup.
+The first latest-replay heavy pass is 39.54 FPS versus the control's 39.74;
+a warmed comparison is pending. The production branch retains only the
+conditional-backedge suspension fix. No quality or memory ordering setting
+is relaxed, and the canonical launcher does not enable this experiment.

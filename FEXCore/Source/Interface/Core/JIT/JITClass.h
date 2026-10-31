@@ -70,6 +70,11 @@ private:
   const bool HostSupportsRPRES {};
   const bool HostSupportsAFP {};
 
+  FEX_CONFIG_OPT(ReuseGuestAddresses, REUSEGUESTADDRESSES);
+  // Only entrypoint-relative addresses, whose relocation delta is shared.
+  std::array<uint64_t, 32> KnownGuestAddresses {};
+  uint32_t KnownGuestAddressMask {};
+
   struct RestartOptions {
     enum class Control : uint64_t {
       Incoming = 0,

@@ -12,6 +12,8 @@ $end_info$
 #include "Interface/Core/JIT/Relocations.h"
 #include "Interface/IR/Passes/RegisterAllocationPass.h"
 
+#include <bit>
+
 namespace FEXCore::CPU {
 
 #define DEF_BINOP_WITH_CONSTANT(FEXOp, VarOp, ConstOp)                                    \
@@ -62,7 +64,36 @@ DEF_OP(EntrypointOffset) {
     Mask = 0xFFFF'FFFFULL;
   }
 
-  InsertGuestRIPMove(GetReg(Node), Constant & Mask);
+  const auto Dst = GetReg(Node);
+  bool Reused = false;
+  if (ReuseGuestAddresses() && OpSize == IR::OpSize::i64Bit) {
+    uint32_t Candidates = KnownGuestAddressMask;
+    while (Candidates) {
+      const unsigned Index = std::countr_zero(Candidates);
+      Candidates &= Candidates - 1;
+      const uint64_t Previous = KnownGuestAddresses[Index];
+      const uint64_t Positive = Constant - Previous;
+      const uint64_t Negative = Previous - Constant;
+      if (ARMEmitter::IsImmAddSub(Positive)) {
+        add(ARMEmitter::Size::i64Bit, Dst, ARMEmitter::Register {Index}, Positive);
+        Reused = true;
+        break;
+      } else if (ARMEmitter::IsImmAddSub(Negative)) {
+        sub(ARMEmitter::Size::i64Bit, Dst, ARMEmitter::Register {Index}, Negative);
+        Reused = true;
+        break;
+      }
+    }
+  }
+  if (!Reused) {
+    InsertGuestRIPMove(Dst, Constant & Mask);
+  }
+  if (ReuseGuestAddresses() && OpSize == IR::OpSize::i64Bit) {
+    KnownGuestAddresses[Dst.Idx()] = Constant;
+    KnownGuestAddressMask |= 1U << Dst.Idx();
+  } else {
+    KnownGuestAddressMask &= ~(1U << Dst.Idx());
+  }
 }
 
 DEF_OP(PatchableGuestData) {

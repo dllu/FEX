@@ -936,6 +936,7 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
   PendingCallReturnTargetLabel = nullptr;
 
   for (auto [BlockNode, BlockHeader] : IR->GetBlocks()) {
+    KnownGuestAddressMask = 0;
     auto BlockIROp = BlockHeader->CW<FEXCore::IR::IROp_CodeBlock>();
 #if defined(ASSERTIONS_ENABLED) && ASSERTIONS_ENABLED
     LOGMAN_THROW_A_FMT(BlockIROp->Header.Op == IR::OP_CODEBLOCK, "IR type failed to be a code block");
@@ -986,6 +987,22 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
     }
 
     for (auto [CodeNode, IROp] : IR->GetCode(BlockNode)) {
+      // General operations, calls, stores and control-flow conservatively
+      // invalidate this small cache. The admitted loads only clobber their
+      // destination plus reserved temporaries, which cannot hold tracked values.
+      switch (IROp->Op) {
+      case IR::OP_ENTRYPOINTOFFSET:
+      case IR::OP_GUESTOPCODE:
+      case IR::OP_INLINECONSTANT: break;
+      case IR::OP_LOADMEM:
+      case IR::OP_LOADMEMTSO:
+        if (IROp->C<IR::IROp_LoadMem>()->Class == IR::RegClass::GPR) {
+          KnownGuestAddressMask &= ~(1U << GetReg(CodeNode).Idx());
+        }
+        break;
+      default: KnownGuestAddressMask = 0; break;
+      }
+
       switch (IROp->Op) {
 #define REGISTER_OP(op, x) \
   case FEXCore::IR::IROps::OP_##op: Op_##x(IROp, CodeNode); break
