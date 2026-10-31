@@ -358,6 +358,9 @@ static void OverrideFeatures(FEXCore::HostFeatures* Features, uint64_t ForceSVEW
   ENABLE_DISABLE_OPTION(SupportsAFP, AFP, AFP);
   ENABLE_DISABLE_OPTION(SupportsRCPC, LRCPC, LRCPC);
   ENABLE_DISABLE_OPTION(SupportsTSOImm9, LRCPC2, LRCPC2);
+  if (HostFeatures() & FEXCore::Config::HostFeatures::ENABLELRCPC2) {
+    Features->AvoidLRCPC2Loads = false;
+  }
   ENABLE_DISABLE_OPTION(SupportsCSSC, CSSC, CSSC);
   ENABLE_DISABLE_OPTION(SupportsPMULL_128Bit, PMULL128, PMULL128);
   ENABLE_DISABLE_OPTION(SupportsRAND, RNG, RNG);
@@ -452,20 +455,22 @@ static void HandleErrata(FEXCore::HostFeatures* HostFeatures, uint64_t MIDR) {
   // not require this stricter memory ordering. Note that this erratum only affects the unscaled versions of
   // LDAPUR (LDAPUR, LDAPURB, LDAPURH), and not LDAPR (LDAPR, LDAPRB, LDAPRH).
   //
-  // The list of cores to disable its use on was taken from the following LLVM PR that accomplishes the same
+  // Keep using STLUR on these cores; the erratum affects only loads. Loads with an
+  // immediate offset can instead form the address explicitly and use LDAPR.
+  // The list of cores to avoid LDAPUR on was taken from the following LLVM PR that accomplishes the same
   // thing: https://github.com/llvm/llvm-project/pull/124274
   for (uint32_t CoreIndex = 0; CoreIndex < HostFeatures->CPUMIDRs.size(); CoreIndex++) {
     const uint32_t CoreMIDR = HostFeatures->CPUMIDRs[CoreIndex];
     const uint32_t Core_MIDR_Implementer = GetMIDRImplementer(CoreMIDR);
     const uint32_t Core_MIDR_PartNum = GetMIDRPartNum(CoreMIDR);
 
-    bool IgnoreLRCPC2 = (Core_MIDR_Implementer == Implementer_ARM) &&
+    bool AvoidLDAPUR = (Core_MIDR_Implementer == Implementer_ARM) &&
                         ((Core_MIDR_PartNum == PartNum_V2) || (Core_MIDR_PartNum == PartNum_V3) || (Core_MIDR_PartNum == PartNum_X3) ||
                          (Core_MIDR_PartNum == PartNum_X4) || (Core_MIDR_PartNum == PartNum_X925) || (Core_MIDR_PartNum == PartNum_V3AE) ||
                          (Core_MIDR_PartNum == PartNum_C1Ultra) || (Core_MIDR_PartNum == PartNum_C1Premium));
 
-    if (IgnoreLRCPC2) {
-      HostFeatures->SupportsTSOImm9 = false;
+    if (AvoidLDAPUR) {
+      HostFeatures->AvoidLRCPC2Loads = true;
       break;
     }
   }

@@ -768,7 +768,7 @@ DEF_OP(LoadMemTSO) {
   const auto Op = IROp->C<IR::IROp_LoadMemTSO>();
   const auto OpSize = IROp->Size;
 
-  const auto MemReg = GetReg(Op->Addr);
+  auto MemReg = GetReg(Op->Addr);
 
   if (Op->Class == IR::RegClass::GPR) {
     LOGMAN_THROW_A_FMT(Op->Offset.IsInvalid() || CTX->HostFeatures.SupportsTSOImm9, "unexpected offset");
@@ -776,7 +776,21 @@ DEF_OP(LoadMemTSO) {
     LOGMAN_THROW_A_FMT(Op->OffsetType == IR::MemOffsetType::SXTX, "unexpected offset type");
   }
 
-  if (CTX->HostFeatures.SupportsTSOImm9 && Op->Class == IR::RegClass::GPR) {
+  if (CTX->HostFeatures.AvoidLRCPC2Loads && Op->Class == IR::RegClass::GPR && !Op->Offset.IsInvalid()) {
+    uint64_t Offset {};
+    bool IsInline = IsInlineConstant(Op->Offset, &Offset);
+    LOGMAN_THROW_A_FMT(IsInline, "expected immediate");
+    if (Offset) {
+      if (static_cast<int64_t>(Offset) < 0) {
+        sub(ARMEmitter::Size::i64Bit, TMP1, MemReg, -static_cast<int64_t>(Offset));
+      } else {
+        add(ARMEmitter::Size::i64Bit, TMP1, MemReg, Offset);
+      }
+      MemReg = TMP1;
+    }
+  }
+
+  if (CTX->HostFeatures.SupportsTSOImm9 && !CTX->HostFeatures.AvoidLRCPC2Loads && Op->Class == IR::RegClass::GPR) {
     const auto Dst = GetReg(Node);
     uint64_t Offset = 0;
     if (!Op->Offset.IsInvalid()) {

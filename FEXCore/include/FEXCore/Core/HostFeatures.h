@@ -104,7 +104,9 @@ struct HostFeatures {
   uint32_t SupportsBF16                : 1 {};
   // Flag if this is InstCountCI
   uint32_t IsInstCountCI : 1 {};
-  uint32_t pad           : 25 {};
+  // Avoid LDAPUR ordering errata while retaining STLUR addressing modes.
+  uint32_t AvoidLRCPC2Loads : 1 {};
+  uint32_t pad           : 24 {};
 
   // This affects codegen, but it isn't machine state
   ProcessFeaturesHash ProcessFeatures {};
