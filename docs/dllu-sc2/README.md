@@ -29,7 +29,8 @@ Cortex-X925 is covered by the existing LDAPUR ordering workaround. The local
 change retains `LDAPR` for loads while permitting `STLUR`'s signed immediate
 addressing for release stores. An immediate-offset load forms its address in a
 reserved temporary register before `LDAPR`. Memory ordering and unaligned
-access backpatching remain enabled. The new host-feature bit is included in
+access backpatching remain enabled. The 32-bit Windows frontend retains its previous register-only TSO addressing
+on affected CPUs. The new host-feature bit is included in
 the existing code-cache hash. Explicit `enablrcpc2` overrides retain their old
 meaning.
 

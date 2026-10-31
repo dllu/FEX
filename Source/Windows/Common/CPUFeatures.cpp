@@ -88,6 +88,12 @@ FEXCore::HostFeatures CPUFeatures::FetchHostFeatures(bool IsWine, FEXCore::HostF
   // AVX is unsupported for WOW64
   HostFeatures.SupportsAVX = HostType == FEXCore::HostFeatures::HostTypeEnum::Arm64ec;
 
+  // Keep the affected CPUs' existing register-only TSO addressing in the
+  // 32-bit frontend; the immediate-store optimization targets ARM64EC.
+  if (HostType == FEXCore::HostFeatures::HostTypeEnum::Wow64 && HostFeatures.AvoidLRCPC2Loads) {
+    HostFeatures.SupportsTSOImm9 = false;
+  }
+
   HostFeatures.ProcessFeatures.HostType = HostType;
   HostFeatures.ProcessFeatures.Is64BitMode = HostType == FEXCore::HostFeatures::HostTypeEnum::Arm64ec;
   // arm64ec supports synchronous faults without a double-fault dance.
