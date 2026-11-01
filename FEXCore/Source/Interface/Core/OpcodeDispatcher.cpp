@@ -28,6 +28,7 @@ $end_info$
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <string_view>
 
 namespace FEXCore::IR {
 
@@ -4107,6 +4108,15 @@ void OpDispatchBuilder::BeginFunction(uint64_t RIP, const fextl::vector<FEXCore:
   Is64BitMode = _Is64BitMode;
   LOGMAN_THROW_A_FMT(Is64BitMode == CTX->Config.Is64BitMode, "Expected operating mode to not change at runtime!");
   IsMonoBackpatcherBlock = MonoBackpatcherBlock;
+  PrefetchInstructions.clear();
+  if (Is64BitMode && FEXCore::Config::Get_PREFETCHDEREFERENCES()) {
+    for (const auto& Block : *Blocks) {
+      for (size_t i = 0; i < Block.NumInstructions; ++i) {
+        const auto* Inst = &Block.DecodedInstructions[i];
+        PrefetchInstructions.emplace(Inst->PC, Inst);
+      }
+    }
+  }
   auto IRHeader = _IRHeader(InvalidNode, RIP, 0, NumInstructions, 0, 0);
   CreateJumpBlocks(Blocks);
 
@@ -4779,10 +4789,83 @@ void OpDispatchBuilder::UnhandledOp(OpcodeArgs) {
   DecodeFailure = true;
 }
 
+void OpDispatchBuilder::PrefetchLoadedPointer(X86Tables::DecodedOp Op, Ref Pointer) {
+  using namespace X86Tables;
+  if (PrefetchInstructions.empty() || !Op->Dest.IsGPR() || OpSizeFromDst(Op) != OpSize::i64Bit ||
+      Op->Dest.Data.GPR.GPR == X86State::REG_RSP) {
+    return;
+  }
+
+  const auto Reg = Op->Dest.Data.GPR.GPR;
+  auto PC = Op->PC + Op->InstSize;
+  for (unsigned Distance = 1; Distance <= 32; ++Distance) {
+    auto It = PrefetchInstructions.find(PC);
+    if (It == PrefetchInstructions.end() || !It->second->TableInfo) {
+      return;
+    }
+    const auto* Next = It->second;
+    const std::string_view Name = Next->TableInfo->Name ?: "";
+    const auto Flags = Next->TableInfo->Flags;
+    if ((Next->OP == 0xe9 || Next->OP == 0xeb) && Next->Src[0].IsLiteral()) {
+      const auto Target = Next->PC + Next->InstSize + static_cast<int64_t>(Next->Src[0].Literal());
+      if (Target <= PC) {
+        return;
+      }
+      PC = Target;
+      continue;
+    }
+    if ((Flags & InstFlags::FLAGS_CALL) ||
+        ((Flags & InstFlags::FLAGS_SETS_RIP) && (Name.empty() || Name[0] != 'J' || Name == "JMP"))) {
+      return;
+    }
+
+    // Follow only already-decoded linear code, including conditional fallthrough.
+    // A branch may bypass the predicted use; this is only a non-faulting hint.
+    const auto Segment = Next->Flags & DecodeFlags::FLAG_SEGMENTS;
+    if (Segment != DecodeFlags::FLAG_FS_PREFIX && Segment != DecodeFlags::FLAG_GS_PREFIX &&
+        !(Next->Flags & DecodeFlags::FLAG_ADDRESS_SIZE) && Name != "LEA" && Name != "NOP") {
+      for (const auto* Operand : {&Next->Dest, &Next->Src[0], &Next->Src[1], &Next->Src[2]}) {
+        std::optional<int64_t> Offset;
+        if (Operand->IsGPRDirect() && Operand->Data.GPR.GPR == Reg) {
+          Offset = 0;
+        } else if (Operand->IsGPRIndirect() && Operand->Data.GPRIndirect.GPR == Reg && !Operand->Data.GPRIndirect.PatchableDisp) {
+          Offset = Operand->Data.GPRIndirect.Displacement;
+        } else if (Operand->IsSIB() && Operand->Data.SIB.Base == Reg && Operand->Data.SIB.Index == X86State::REG_INVALID &&
+                   !Operand->Data.SIB.PatchableDisp) {
+          Offset = Operand->Data.SIB.Offset;
+        }
+        if (Offset) {
+          // Immediate consumers have too little lead time. Avoid arbitrary
+          // integer loads and prefetch the actual field, rather than offset 0.
+          if (Distance >= 5 && *Offset >= -4096 && *Offset <= 4096) {
+            // PRFM's immediate is unsigned and scaled by eight. Form other
+            // offsets explicitly instead of passing an invalid inline offset.
+            if (*Offset < 0 || (*Offset & 7)) {
+              auto Address = Add(OpSize::i64Bit, Pointer, Constant(*Offset));
+              _Prefetch(false, false, 1, Address, Invalid(), MemOffsetType::SXTX, 1);
+            } else {
+              _Prefetch(false, false, 1, Pointer, *Offset ? _InlineConstant(*Offset) : Invalid(), MemOffsetType::SXTX, 1);
+            }
+          }
+          return;
+        }
+      }
+    }
+    if (Next->Dest.IsGPR() && Next->Dest.Data.GPR.GPR == Reg && Name != "CMP" && Name != "TEST") {
+      return;
+    }
+    PC += Next->InstSize;
+  }
+}
+
 void OpDispatchBuilder::MOVGPROp(OpcodeArgs, uint32_t SrcIndex) {
   // StoreResult will store with the same size as the input, so we allow upper
   // garbage on the input. The zero extension would be pointless.
   Ref Src = LoadSourceGPR(Op, Op->Src[SrcIndex], Op->Flags, {.Align = OpSize::i8Bit, .AllowUpperGarbage = true});
+  const auto& Operand = Op->Src[SrcIndex];
+  if (Operand.IsGPRDirect() || Operand.IsGPRIndirect() || Operand.IsRIPRelative() || Operand.IsSIB()) {
+    PrefetchLoadedPointer(Op, Src);
+  }
   StoreResultGPR(Op, Src, OpSize::i8Bit);
 }
 

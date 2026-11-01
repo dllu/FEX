@@ -138,3 +138,36 @@ relation across the conditional back-edge. Both builds pass 500 suspended
 contexts with the fixed runtime, alongside the existing memory/publication,
 exception-flags and event/semaphore/mutex/APC probes. Compile each with the
 corresponding LLVM-MinGW compiler and `-O2`.
+
+## Experimental decoded-pointer prefetch
+
+This private experiment branch adds default-off PrefetchDereferences. It scans
+already-decoded instructions for a 64-bit MOV result used as a simple memory
+base 5-32 instructions later, and hints the actual constant field offset. It
+can follow forward direct jumps within decoded code. Calls, backward/indirect
+jumps and obvious register overwrites end the scan. Conditional fallthrough
+is speculative. Relocation/segment/index/address-size cases are excluded.
+This adds no guest load, removes no ordering and changes no fault/backpatch
+handling. Negative/non-eight-byte PRFM offsets form their address explicitly.
+
+Build dereference-prefetch-probe.c with the LLVM-MinGW x64 compiler and -O2,
+using the matching DLL pair/native helpers in a disposable Wine prefix.
+FEX_PREFETCHDEREFERENCES=1 enables the feature; zero is the control. It checks
+10,000 iterations of positive/negative/odd field offsets, immediate/clobbered
+controls, a forward-jump use, skipped invalid pointers and precise null faults.
+FEX_BLOCKJITNAMING=1 HOLD_PROBE_SECONDS=120 permits read-only JIT inspection
+with check-dereference-prefetch.py PID --expect on|off --output PATH as root.
+Compile the exe beside the checker, and set its llvm-nm path for your checkout.
+The test executes 128 small functions to flush buffered perf-map entries.
+Both modes pass; actual code retains ordered loads and selects the intended
+hints. Existing cross-ABI memory/publication, flags, fault/suspend and sync
+probes pass. These are correctness checks, not evidence of a game-FPS gain.
+
+The first scanner stopped before forward jumps and measured 42.73 first /
+41.82 warm FPS in the latest replay at native Wayland, 4K maximum settings,
+CPU 15/workers 16-19. A 57.24 FPS run used a different observer perspective and
+is excluded from comparisons. Replay preparation now verifies both 21:13 and
+the first player's perspective. The forward-jump scanner measures 39.49 first / 42.30 warm FPS; the prior
+accepted CRT control is about 42.8 FPS. The intended hot rdi+0x48 hint is
+verified in actual game code, but no FPS gain is established. Neither version
+is retained in production. The pure performance branch remains the default.

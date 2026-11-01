@@ -1373,6 +1373,8 @@ private:
   const bool CFInvertedABI {true};
 
   fextl::map<uint64_t, JumpTargetInfo> JumpTargets;
+  fextl::map<uint64_t, X86Tables::DecodedOp> PrefetchInstructions;
+  void PrefetchLoadedPointer(X86Tables::DecodedOp Op, Ref Pointer);
   bool HandledLock {false};
   bool DecodeFailure {false};
   bool NeedsBlockEnd {false};

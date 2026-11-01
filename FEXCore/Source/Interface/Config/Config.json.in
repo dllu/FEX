@@ -608,6 +608,15 @@
           "Highly likely to break any multithreaded application if disabled."
         ]
       },
+      "PrefetchDereferences": {
+        "Type": "bool",
+        "Default": "false",
+        "AffectsCodeGen": "true",
+        "Desc": [
+          "Experimental: prefetch a future constant-offset use of a loaded 64-bit pointer.",
+          "Uses decoded instructions only; does not add guest loads or relax memory ordering."
+        ]
+      },
       "VectorTSOEnabled": {
         "Type": "bool",
         "Default": "false",
